@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
-const wss = new WebSocket.Server({ port: 8081 });
+const PORT = process.env.PORT || 8081; // Use Render's PORT env var, or 8081 locally
+const wss = new WebSocket.Server({ port: PORT });
 
 // This object will store our active game sessions.
 // Key: 6-digit code
