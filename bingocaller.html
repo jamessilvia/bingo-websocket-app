@@ -338,7 +338,7 @@
 
             // WebSocket Connection and Message Handling
             useEffect(() => {
-                const ws = new WebSocket('ws://localhost:8081'); // Connect to your Node.js WebSocket server
+                const ws = new WebSocket('wss://bingo-websocket-server-t34e.onrender.com'); // Use YOUR actual server URL // Connect to your Node.js WebSocket server
 
                 ws.onopen = () => {
                     console.log('TV Connected to WebSocket server. Registering...');
