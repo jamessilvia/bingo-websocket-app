@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bingo Caller (TV Display)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom CSS for animations and basic styling not handled by Tailwind */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+            overflow: hidden; /* Prevent scrolling */
+        }
+        .animate-pulse-slow { animation: pulse-slow 3s infinite ease-in-out; }
+        @keyframes pulse-slow { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.8; transform: scale(1.02); } }
+        .animate-bounce-in { animation: bounceIn 0.8s ease-out forwards; }
+        @keyframes bounceIn { 0% { transform: scale(0.1); opacity: 0; } 60% { transform: scale(1.1); opacity: 1; } 80% { transform: scale(0.9); } 100% { transform: scale(1); } }
+        .animate-fade-in { animation: fadeIn 1s ease-out forwards; }
+        @keyframes fadeIn { 0% { opacity: 0; } 100% { opacity: 1; } }
+        /* Prominent TV DISPLAY text */
+        .tv-display-label {
+            position: absolute;
+            top: 1rem;
+            left: 1rem;
+            font-size: 2rem; /* Large text */
+            font-weight: bold;
+            color: rgba(255, 255, 255, 0.8);
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            z-index: 10;
+        }
+        /* Style for the fixed connection code display */
+        .connection-code-display {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            z-index: 10;
+        }
+        .connection-code-display p {
+            font-size: 0.85rem;
+            color: #d1d5db;
+            margin-bottom: 0.25rem;
+        }
+        .connection-code-display .code {
+            font-size: 2rem; /* Large code display */
+            font-weight: bold;
+            color: #facc15; /* Yellowish color for code */
+            letter-spacing: 0.1em;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+
+    <script type="module">
+        // NO FIREBASE IMPORTS NEEDED FOR THIS APPROACH!
+        const App = () => {
+            const { useState, useEffect, useRef, useCallback } = React;
+
+            const [currentBall, setCurrentBall] = useState(null);
+            const [calledBalls, setCalledBalls] = useState([]);
+            const [allBalls, setAllBalls] = useState([]);
+            const [availableBalls, setAvailableBalls] = useState([]);
+            const [isPlaying, setIsPlaying] = useState(false);
+            const [callIntervalSeconds, setCallIntervalSeconds] = useState(3);
+            const [countdown, setCountdown] = useState(3);
+            const [message, setMessage] = useState('');
+            const [generatedCode, setGeneratedCode] = useState('------'); // State for the generated 6-digit code
+            const [socket, setSocket] = useState(null); // WebSocket connection
+            const [speechEnabled, setSpeechEnabled] = useState(true);
+            const [availableVoices, setAvailableVoices] = useState([]);
+            const [selectedVoiceURI, setSelectedVoiceURI] = useState('');
+            const [customGamePatternIndices, setCustomGamePatternIndices] = useState([]); 
+            const [queuedBallsFromServer, setQueuedBallsFromServer] = useState([]); 
+            
+            const intervalRef = useRef(null);
+            const countdownIntervalRef = useRef(null);
+            const speechUtteranceRef = useRef(null);
+
+            // Helper to convert 5x5 grid indices to Bingo numbers (1-75)
+            const calculateMainPatternFromIndices = useCallback((indices) => {
+                const mainPattern = new Set();
+                indices.forEach(idx => {
+                    const col = idx % 5;
+                    const row = Math.floor(idx / 5);
+                    const bingoNumber = (col * 15) + row + 1;
+                    mainPattern.add(bingoNumber);
+                });
+                return Array.from(mainPattern).sort((a,b) => a-b);
+            }, []);
+
+            const getBallLetter = useCallback((ball) => {
+                if (ball === null) return '';
+                if (ball >= 1 && ball <= 15) return 'B';
+                if (ball >= 16 && ball <= 30) return 'I';
+                if (ball >= 31 && ball <= 45) return 'N';
+                if (ball >= 46 && ball <= 60) return 'G';
+                if (ball >= 61 && ball <= 75) return 'O';
+                return '';
+            }, []);
+
+            // Function to send current status to the server
+            const sendTvStatus = useCallback((status) => {
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ type: 'tvStatusUpdate', status }));
+                }
+            }, [socket]);
+
+            // Function to send initial settings to the server (so controllers can sync)
+            const sendTvInitialSettings = useCallback((settings) => {
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ type: 'tvInitialSettings', settings }));
+                }
+            }, [socket]);
+
+            // Function to send current queued numbers back to server (after consumption by TV)
+            const sendQueuedNumbersUpdate = useCallback((queue) => {
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ type: 'queuedNumbersUpdate', queue }));
+                }
+            }, [socket]);
+
+
+            const initializeNewGame = useCallback((initialCallInterval = 3, initialVoiceURI = '', initialSpeechEnabled = true, initialGamePatternIndices = []) => {
+                const numbers = Array.from({ length: 75 }, (_, i) => i + 1);
+                const shuffledNumbers = [...numbers].sort(() => Math.random() - 0.5);
+                
+                setAllBalls(numbers);
+                setAvailableBalls(shuffledNumbers);
+                setCurrentBall(null);
+                setCalledBalls([]);
+                setIsPlaying(false);
+                setMessage('');
+                setCallIntervalSeconds(initialCallInterval);
+                setCountdown(initialCallInterval);
+                setCustomGamePatternIndices(initialGamePatternIndices); 
+                setSelectedVoiceURI(initialVoiceURI);
+                setSpeechEnabled(initialSpeechEnabled);
+                setQueuedBallsFromServer([]); 
+                sendQueuedNumbersUpdate([]); // Clear queue on server
+
+                sendTvStatus({
+                    currentBall: null,
+                    calledBalls: [],
+                    availableBallsCount: shuffledNumbers.length,
+                    isPlaying: false,
+                    callIntervalSeconds: initialCallInterval,
+                    customGamePatternIndices: initialGamePatternIndices,
+                    speechEnabled: initialSpeechEnabled,
+                    selectedVoiceURI: initialVoiceURI,
+                    message: '',
+                    countdown: initialCallInterval,
+                    timestamp: Date.now()
+                });
+            }, [sendTvStatus, sendQueuedNumbersUpdate]);
+
+
+            const callNextBall = useCallback(() => {
+                setAvailableBalls(prevAvailableBalls => {
+                    let nextBall = null;
+                    const newAvailableBalls = [...prevAvailableBalls];
+                    const currentQueued = Array.isArray(queuedBallsFromServer) ? [...queuedBallsFromServer] : [];
+
+                    while (currentQueued.length > 0) {
+                        const potentialNextBall = currentQueued[0];
+                        if (newAvailableBalls.includes(potentialNextBall)) {
+                            nextBall = potentialNextBall;
+                            const indexToRemove = newAvailableBalls.indexOf(potentialNextBall);
+                            newAvailableBalls.splice(indexToRemove, 1);
+                            currentQueued.shift();
+                            setQueuedBallsFromServer(currentQueued); // Update local queue state
+                            sendQueuedNumbersUpdate(currentQueued); // Inform server of new queue
+                            break;
+                        } else {
+                            console.warn(`Queued ball ${potentialNextBall} is not available. Skipping.`);
+                            currentQueued.shift();
+                            setQueuedBallsFromServer(currentQueued); // Update local queue state
+                            sendQueuedNumbersUpdate(currentQueued); // Inform server of new queue
+                        }
+                    }
+
+                    if (nextBall === null && newAvailableBalls.length > 0) {
+                        const randomIndex = Math.floor(Math.random() * newAvailableBalls.length);
+                        nextBall = newAvailableBalls.splice(randomIndex, 1)[0];
+                    } else if (nextBall === null && newAvailableBalls.length === 0) {
+                        setMessage("Game Over! All balls called.");
+                        if (isPlaying) { 
+                            setIsPlaying(false);
+                        }
+                        if (intervalRef.current) clearInterval(intervalRef.current);
+                        if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+                        sendTvStatus({ isPlaying: false, message: "Game Over! All balls called.", currentBall: currentBall, countdown: 0, timestamp: Date.now() });
+                        return [];
+                    }
+
+                    setCurrentBall(nextBall);
+                    setCalledBalls(prevCalledBalls => {
+                        const updatedCalled = [...prevCalledBalls, nextBall].sort((a, b) => a - b);
+                        sendTvStatus({
+                            currentBall: nextBall,
+                            calledBalls: updatedCalled,
+                            availableBallsCount: newAvailableBalls.length,
+                            isPlaying: isPlaying,
+                            message: '',
+                            countdown: callIntervalSeconds,
+                            timestamp: Date.now()
+                        });
+                        return updatedCalled;
+                    });
+                    setMessage('');
+                    setCountdown(callIntervalSeconds);
+
+                    if (speechEnabled && 'speechSynthesis' in window && nextBall !== null) {
+                        const textToSpeak = `${getBallLetter(nextBall)} ${nextBall}`;
+                        if (speechUtteranceRef.current) {
+                            window.speechSynthesis.cancel();
+                        }
+                        speechUtteranceRef.current = new SpeechSynthesisUtterance(textToSpeak);
+                        if (selectedVoiceURI) {
+                            const voice = availableVoices.find(v => v.voiceURI === selectedVoiceURI);
+                            if (voice) {
+                                speechUtteranceRef.current.voice = voice;
+                            }
+                        }
+                        speechUtteranceRef.current.lang = 'en-US';
+                        speechUtteranceRef.current.rate = 0.8;
+                        window.speechSynthesis.speak(speechUtteranceRef.current);
+                    }
+
+                    return newAvailableBalls;
+                });
+            }, [speechEnabled, getBallLetter, callIntervalSeconds, selectedVoiceURI, availableVoices, sendTvStatus, isPlaying, currentBall, queuedBallsFromServer, sendQueuedNumbersUpdate]);
+
+            const startGameAutomation = useCallback(() => {
+                if (availableBalls.length === 0 && calledBalls.length > 0) {
+                    setMessage("Game Over! Please reset to play again.");
+                    sendTvStatus({ message: "Game Over! Please reset to play again.", timestamp: Date.now() });
+                    return;
+                }
+                if (!isPlaying) {
+                    setIsPlaying(true);
+                    if (intervalRef.current) clearInterval(intervalRef.current);
+                    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+
+                    intervalRef.current = setInterval(callNextBall, callIntervalSeconds * 1000);
+                    
+                    callNextBall(); 
+
+                    setCountdown(callIntervalSeconds);
+                    countdownIntervalRef.current = setInterval(() => {
+                        setCountdown(prev => {
+                            if (prev <= 1) return callIntervalSeconds;
+                            return prev - 1;
+                        });
+                    }, 1000);
+                    sendTvStatus({ isPlaying: true, message: '', timestamp: Date.now() });
+                }
+            }, [isPlaying, availableBalls, calledBalls, callNextBall, callIntervalSeconds, sendTvStatus]);
+
+            const stopGameAutomation = useCallback(() => {
+                setIsPlaying(false);
+                if (intervalRef.current) clearInterval(intervalRef.current);
+                if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+                if (window.speechSynthesis && speechUtteranceRef.current) {
+                    window.speechSynthesis.cancel();
+                }
+                sendTvStatus({ isPlaying: false, timestamp: Date.now() });
+            }, [sendTvStatus]);
+
+            const resetGameRemotely = useCallback((remoteSettings) => { 
+                stopGameAutomation();
+                // Use remote settings if provided, otherwise default
+                const initialGamePatternIndices = remoteSettings?.customGamePatternIndices || [];
+                const initialVoiceURI = remoteSettings?.selectedVoiceURI || '';
+                const initialSpeechEnabled = remoteSettings?.speechEnabled !== undefined ? remoteSettings.speechEnabled : true;
+                const initialCallInterval = remoteSettings?.callIntervalSeconds || 3;
+
+                initializeNewGame(initialCallInterval, initialVoiceURI, initialSpeechEnabled, initialGamePatternIndices);
+            }, [stopGameAutomation, initializeNewGame]); 
+
+            const callNextBallRemotely = useCallback(() => {
+                if (isPlaying) {
+                    stopGameAutomation();
+                }
+                callNextBall();
+                setCountdown(callIntervalSeconds);
+            }, [isPlaying, stopGameAutomation, callNextBall, callIntervalSeconds]);
+
+            const updateIntervalRemotely = useCallback((newInterval) => {
+                const value = parseInt(newInterval, 10);
+                if (!isNaN(value) && value >= 1 && value <= 20) {
+                    setCallIntervalSeconds(value);
+                    setCountdown(value);
+                    if (isPlaying) {
+                        stopGameAutomation();
+                        if (intervalRef.current) clearInterval(intervalRef.current);
+                        intervalRef.current = setInterval(callNextBall, value * 1000);
+                        if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+                        countdownIntervalRef.current = setInterval(() => {
+                            setCountdown(prev => {
+                                if (prev <= 1) return value;
+                            return prev - 1;
+                            });
+                        }, 1000);
+                    }
+                    sendTvStatus({ callIntervalSeconds: value, timestamp: Date.now() });
+                }
+            }, [isPlaying, stopGameAutomation, callNextBall, sendTvStatus]);
+
+            const updateVoiceRemotely = useCallback((voiceURI) => {
+                setSelectedVoiceURI(voiceURI);
+                sendTvStatus({ selectedVoiceURI: voiceURI, timestamp: Date.now() });
+            }, [sendTvStatus]);
+
+            const updateSpeechEnabledRemotely = useCallback((enabled) => {
+                setSpeechEnabled(enabled);
+                sendTvStatus({ speechEnabled: enabled, timestamp: Date.now() });
+            }, [sendTvStatus]);
+
+            const updateGamePatternRemotely = useCallback((patternIndices) => {
+                const cleanedIndices = Array.isArray(patternIndices) ? patternIndices.filter(Number.isInteger) : [];
+                setCustomGamePatternIndices(cleanedIndices);
+            }, []);
+
+            // WebSocket Connection and Message Handling
+            useEffect(() => {
+                const ws = new WebSocket('ws://localhost:8081'); // Connect to your Node.js WebSocket server
+
+                ws.onopen = () => {
+                    console.log('TV Connected to WebSocket server. Registering...');
+                    ws.send(JSON.stringify({ type: 'registerTv' }));
+                };
+
+                ws.onmessage = event => {
+                    const data = JSON.parse(event.data);
+                    console.log('TV Received:', data);
+
+                    if (data.type === 'sessionCode') {
+                        setGeneratedCode(data.code);
+                        // Once registered, send initial game state and settings to server
+                        sendTvStatus({
+                            currentBall: currentBall, calledBalls: calledBalls,
+                            availableBallsCount: availableBalls.length, isPlaying: isPlaying,
+                            message: message, countdown: countdown, timestamp: Date.now()
+                        });
+                        sendTvInitialSettings({
+                            callIntervalSeconds: callIntervalSeconds,
+                            speechEnabled: speechEnabled,
+                            selectedVoiceURI: selectedVoiceURI,
+                            customGamePatternIndices: customGamePatternIndices
+                        });
+                    } else if (data.type === 'command') {
+                        // Handle commands from controllers
+                        const command = data.command;
+                        switch (command.type) {
+                            case 'startGame': startGameAutomation(); break;
+                            case 'stopGame': stopGameAutomation(); break;
+                            case 'nextBall': callNextBallRemotely(); break;
+                            case 'resetGame': 
+                                // Reset based on server's last known settings (or defaults)
+                                resetGameRemotely(command.value); // Command.value here will be the current settings from server
+                                break;
+                            default: console.warn('Unknown command:', command.type);
+                        }
+                    } else if (data.type === 'settingsUpdate') {
+                        // Handle settings updates from controllers
+                        const settings = data.settings;
+                        if (settings.callIntervalSeconds !== undefined) updateIntervalRemotely(settings.callIntervalSeconds);
+                        if (settings.speechEnabled !== undefined) updateSpeechEnabledRemotely(settings.speechEnabled);
+                        if (settings.selectedVoiceURI !== undefined) updateVoiceRemotely(settings.selectedVoiceURI);
+                        if (settings.customGamePatternIndices !== undefined) updateGamePatternRemotely(settings.customGamePatternIndices);
+                    } else if (data.type === 'queueUpdate') {
+                        // Receive updated queue from server (which got it from a controller)
+                        setQueuedBallsFromServer(data.queue);
+                        // If game is paused and queue has numbers, start it automatically
+                        if (data.queue.length > 0 && !isPlaying) {
+                            startGameAutomation();
+                        }
+                    } else if (data.type === 'controllerDisconnected') {
+                        console.log(`Controller ${data.controllerId} disconnected.`);
+                        // Optional: show a message on screen that a controller left
+                    }
+                };
+
+                ws.onclose = () => {
+                    console.log('TV Disconnected from WebSocket server.');
+                    setGeneratedCode('LOST CONN');
+                    setMessage('Connection Lost! Restart Server & Refresh.');
+                    if (intervalRef.current) clearInterval(intervalRef.current);
+                    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+                };
+
+                ws.onerror = error => {
+                    console.error('TV WebSocket Error:', error);
+                    setGeneratedCode('ERROR');
+                    setMessage('Network Error! Check Server.');
+                };
+
+                setSocket(ws); // Store socket in state for other functions to use
+
+                // Cleanup on unmount
+                return () => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.close();
+                    }
+                };
+            }, [callIntervalSeconds, calledBalls, availableBalls, isPlaying, message, countdown, speechEnabled, selectedVoiceURI, customGamePatternIndices, sendTvStatus, sendTvInitialSettings, callNextBallRemotely, resetGameRemotely, startGameAutomation, stopGameAutomation, updateIntervalRemotely, updateVoiceRemotely, updateSpeechEnabledRemotely, updateGamePatternRemotely]);
+
+
+            // Effect to populate voice options dynamically (from browser)
+            useEffect(() => {
+                if ('speechSynthesis' in window) {
+                    const populateVoices = () => {
+                        const voices = window.speechSynthesis.getVoices();
+                        setAvailableVoices(voices);
+                        if (!selectedVoiceURI && voices.length > 0) {
+                            const defaultVoice = voices.find(v => v.lang === 'en-US' || v.name.includes('Google US English')) || voices[0];
+                            setSelectedVoiceURI(defaultVoice ? defaultVoice.voiceURI : '');
+                        }
+                    };
+                    populateVoices();
+                    if (window.speechSynthesis.onvoiceschanged !== undefined) {
+                        window.speechSynthesis.onvoiceschanged = populateVoices;
+                    }
+                }
+            }, [selectedVoiceURI]);
+
+
+            const BingoBoard = ({ calledBalls, customGamePatternIndices }) => {
+                const mainPattern = useCallback(calculateMainPatternFromIndices(customGamePatternIndices), [customGamePatternIndices]);
+
+                const getNumberColorClass = useCallback((number) => {
+                    const isCalled = calledBalls.includes(number);
+                    const isPartOfPattern = mainPattern.includes(number);
+
+                    if (isCalled) {
+                        return 'bg-green-500 text-white border-2 border-green-700 transform scale-105';
+                    } else if (isPartOfPattern) {
+                        return 'bg-blue-800 bg-opacity-60 text-white border border-blue-700';
+                    } else {
+                        return 'bg-gray-700 text-gray-300 border border-gray-600';
+                    }
+                }, [calledBalls, mainPattern]);
+
+                return (
+                    React.createElement('div', { className: "flex-grow grid grid-rows-5", style: { gridTemplateColumns: 'repeat(15, 1fr)', gap: '2px' } },
+                        Array.from({ length: 75 }, (_, i) => i + 1).map((number) => (
+                            React.createElement('div', {
+                                key: number,
+                                className: `
+                                    flex items-center justify-center font-bold text-base sm:text-lg md:text-xl lg:text-2xl
+                                    rounded-sm transition-colors duration-200 ease-in-out shadow-sm
+                                    ${getNumberColorClass(number)}
+                                `
+                            }, number)
+                        ))
+                    )
+                );
+            };
+
+            const GamePatternPreview = ({ customGamePatternIndices }) => {
+                const previewTitle = customGamePatternIndices.length === 0 ? "No Pattern Selected" : "Current Game Pattern";
+
+                return (
+                    React.createElement('div', { className: "bg-gray-700 p-4 rounded-xl shadow-lg border-2 border-blue-400 text-center w-full" },
+                        React.createElement('p', { className: "text-xl font-bold text-blue-300 mb-2" }, previewTitle),
+                        React.createElement('div', { className: "grid grid-rows-5", style: { gridTemplateColumns: 'repeat(5, 1fr)', gap: '0px' } },
+                            Array.from({ length: 25 }, (_, i) => i).map((index) => {
+                                const isPartOfPattern = customGamePatternIndices.includes(index);
+                                return (
+                                    React.createElement('div', {
+                                        key: index,
+                                        className: `
+                                            w-6 h-6 text-xs font-bold flex items-center justify-center rounded-sm
+                                            ${isPartOfPattern ? 'bg-blue-600' : 'bg-gray-800'}`,
+                                    })
+                                );
+                            })
+                        )
+                    )
+                );
+            };
+
+            const PreviousCallsDisplay = ({ calledBalls }) => {
+                const lastCalled = [...calledBalls].reverse().slice(0, 9);
+                return (
+                    React.createElement('div', { className: "bg-gray-700 p-4 rounded-xl shadow-lg border-2 border-purple-400 text-center w-full" },
+                        React.createElement('p', { className: "text-xl font-bold text-purple-300 mb-2" }, "Previous Calls"),
+                        React.createElement('div', { className: "grid grid-cols-3 gap-1 md:gap-2 justify-items-center" },
+                            lastCalled.length > 0 ? (
+                                lastCalled.map((ball) => (
+                                    React.createElement('div', { key: ball, className: "w-10 h-10 md:w-12 md:h-12 bg-purple-500 text-white rounded-md flex items-center justify-center font-bold text-lg shadow-sm" }, ball)
+                                ))
+                            ) : (
+                                React.createElement('p', { className: "col-span-3 text-gray-400 text-sm" }, "None yet")
+                            )
+                        )
+                    )
+                );
+            };
+
+            const MessageBox = ({ message, onClose }) => {
+                if (!message) return null;
+                return (
+                    React.createElement('div', { className: "fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4" },
+                        React.createElement('div', { className: "bg-white text-gray-900 p-8 rounded-lg shadow-xl max-w-lg w-full text-center" },
+                            React.createElement('p', { className: "text-3xl font-bold mb-6" }, message),
+                            React.createElement('button', {
+                                onClick: onClose,
+                                className: "px-8 py-3 bg-red-600 text-white rounded-lg shadow-md hover:bg-red-700 transition-colors duration-300 transform hover:scale-105 font-semibold text-lg"
+                            }, "Close")
+                        )
+                    )
+                );
+            };
+
+
+            return (
+              React.createElement('div', { className: "min-h-screen bg-gradient-to-br from-indigo-900 to-purple-900 text-white font-inter flex flex-col p-4 md:p-8" },
+                // Connection Code Display (fixed in top right)
+                React.createElement('div', { className: "connection-code-display" },
+                    React.createElement('p', null, "Connect with code:"),
+                    React.createElement('span', { className: "code" }, generatedCode)
+                ),
+
+                // Prominent TV Display Label
+                React.createElement('div', { className: "tv-display-label" }, "TV DISPLAY"),
+
+                React.createElement('div', { className: "flex-grow w-full max-w-screen-2xl mx-auto rounded-xl overflow-hidden shadow-2xl bg-gray-800 bg-opacity-80 p-6 md:p-10", style: { display: 'grid', gridTemplateColumns: 'auto 1fr auto', gridTemplateRows: 'auto 1fr', gap: '1rem' } },
+                  React.createElement('div', { className: "text-center", style: { gridColumn: '1 / 4', gridRow: '1 / 2' } },
+                    React.createElement('h1', { className: "text-4xl sm:text-5xl md:text-6xl lg:text-7xl xl:text-8xl font-extrabold mb-4 text-yellow-400 drop-shadow-lg animate-pulse-slow" }, "BINGO CALLER")
+                  ),
+                  React.createElement('div', { className: "flex flex-col justify-around py-2 rounded-lg pr-4 pl-2 flex-shrink-0", style: { gridRow: '2 / 3', display: 'flex', alignItems: 'center' } },
+                    ['B', 'I', 'N', 'G', 'O'].map((letter) => (
+                      React.createElement('div', { key: letter, className: "text-4xl sm:text-5xl md:text-6xl lg:text-7xl xl:text-8xl font-extrabold text-blue-400 flex items-center justify-center py-2 leading-none" }, letter)
+                    ))
+                  ),
+                  React.createElement('div', { className: "flex flex-col", style: { gridColumn: '2 / 3', gridRow: '2 / 3' } },
+                    React.createElement(BingoBoard, { calledBalls: calledBalls, customGamePatternIndices: customGamePatternIndices })
+                  ),
+                  React.createElement('div', { className: "flex flex-col items-center p-4 gap-4 flex-shrink-0 bg-gray-800 bg-opacity-60 rounded-xl shadow-lg", style: { gridRow: '1 / 3', gridColumn: '3 / 4' } },
+                    React.createElement('div', { className: "w-full bg-gray-700 bg-opacity-60 rounded-xl p-4 shadow-inner border-2 border-yellow-500 text-center flex flex-col items-center" },
+                      React.createElement('p', { className: "text-xl font-bold text-gray-300 mb-2" }, "Current Call"),
+                      currentBall !== null ? (
+                        React.createElement('div', { className: "flex flex-col items-center justify-center rounded-full bg-yellow-500 text-gray-900 w-28 h-28 sm:w-32 sm:h-32 text-center shadow-lg transform hover:scale-105 transition-transform duration-300 border-4 border-white animate-bounce-in" },
+                          React.createElement('span', { className: "text-4xl sm:text-5xl font-extrabold" }, getBallLetter(currentBall)),
+                          React.createElement('span', { className: "text-3xl sm:text-4xl font-extrabold" }, currentBall)
+                        )
+                      ) : (
+                        React.createElement('div', { className: "flex flex-col items-center justify-center rounded-full bg-gray-600 text-gray-300 w-28 h-28 sm:w-32 sm:h-32 text-center shadow-inner border-4 border-gray-500 animate-fade-in" },
+                          React.createElement('span', { className: "text-2xl sm:text-3xl font-extrabold" }, "Wait")
+                        )
+                      ),
+                      React.createElement('p', { className: "mt-4 text-lg text-blue-300 font-semibold" },
+                        "Next Call in: ", React.createElement('span', { className: "font-extrabold text-blue-200" }, countdown), "s"
+                      )
+                    ),
+                    React.createElement(GamePatternPreview, { customGamePatternIndices: customGamePatternIndices }),
+                    React.createElement(PreviousCallsDisplay, { calledBalls: calledBalls })
+                  )
+                ),
+                message && React.createElement(MessageBox, { message: message, onClose: () => setMessage('') })
+              )
+            );
+        };
+        
+        // This part runs once the script loads and makes the React app
+        // available globally, then mounts it.
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(React.createElement(App));
+
+    </script>
+</body>
+</html>

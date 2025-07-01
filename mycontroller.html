@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Bingo Controller</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a202c; /* Dark background */
+            color: #e2e8f0; /* Light text */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        /* Enhanced button styles */
+        .game-control-btn {
+            @apply py-4 px-6 rounded-xl font-extrabold text-xl shadow-lg transition-all duration-300 transform hover:scale-105 hover:shadow-xl;
+        }
+        /* All game control buttons are now solid green */
+        .game-control-btn.start,
+        .game-control-btn.stop,
+        .game-control-btn.next,
+        .game-control-btn.reset {
+            @apply bg-green-600 text-white border-2 border-green-700 hover:bg-green-700; /* Solid green background */
+        }
+        .input-field {
+            @apply w-full p-3 rounded-lg bg-gray-700 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-gray-200;
+        }
+        .modal-overlay {
+            background-color: rgba(0, 0, 0, 0.7);
+        }
+        /* Ensure mobile responsiveness */
+        .min-h-screen-mobile {
+            min-height: 100vh;
+            min-height: -webkit-fill-available; /* For mobile browsers that calculate vh differently */
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+
+    <script type="module">
+        // NO FIREBASE IMPORTS NEEDED FOR THIS APPROACH!
+        const App = () => {
+            const { useState, useEffect, useCallback } = React;
+
+            const [enteredCode, setEnteredCode] = useState(''); 
+            const [appStatusMessage, setAppStatusMessage] = useState('Enter 6-digit code to connect.');
+            const [isConnected, setIsConnected] = useState(false); // Manually triggered connect
+            const [socket, setSocket] = useState(null); // WebSocket connection
+            const [showSettingsModal, setShowSettingsModal] = useState(false); 
+            
+            const [numbersToQueueInput, setNumbersToQueueInput] = useState('');
+            const [currentTvState, setCurrentTvState] = useState({
+                currentBall: null,
+                calledBalls: [],
+                availableBallsCount: 75,
+                isPlaying: false,
+                message: '',
+                countdown: 0,
+            });
+            const [callInterval, setCallInterval] = useState(3); // Local state for interval in this controller
+
+
+            // Unique ID for this controller instance (for server to identify)
+            const controllerCustomId = 'controller_' + Math.random().toString(36).substring(2, 9);
+
+            // WebSocket Connection and Message Handling
+            useEffect(() => {
+                const ws = new WebSocket('ws://localhost:8081'); // Connect to your Node.js WebSocket server
+
+                ws.onopen = () => {
+                    console.log(`Controller ${controllerCustomId} connected to WebSocket server.`);
+                    setSocket(ws); // Store socket in state
+                    setAppStatusMessage('Connected to server. Enter TV code.');
+                };
+
+                ws.onmessage = event => {
+                    const data = JSON.parse(event.data);
+                    console.log(`Controller ${controllerCustomId} Received:`, data);
+
+                    if (data.type === 'joined') {
+                        setIsConnected(true);
+                        setAppStatusMessage(`Successfully joined session ${data.code}.`);
+                    } else if (data.type === 'tvStatus') {
+                        // Update local UI with TV's status
+                        setCurrentTvState(data.status);
+                    } else if (data.type === 'initialSettings') {
+                        // Sync initial settings from TV
+                        setCallInterval(data.settings.callIntervalSeconds || 3);
+                    } else if (data.type === 'error') {
+                        setAppStatusMessage(`Error: ${data.message}`);
+                        setIsConnected(false);
+                        setSocket(null); // Clear socket on error
+                    } else if (data.type === 'sessionEnded') {
+                        setAppStatusMessage(`Session ended: ${data.message}`);
+                        setIsConnected(false);
+                        setSocket(null); // Clear socket
+                    } else if (data.type === 'queuedNumbers') {
+                        // Optionally update queue display on controller if needed (currently not used)
+                        // console.log("Received updated queue:", data.queue);
+                    }
+                };
+
+                ws.onclose = () => {
+                    console.log(`Controller ${controllerCustomId} Disconnected from WebSocket server.`);
+                    setAppStatusMessage('Disconnected. Server might be down or TV closed session.');
+                    setIsConnected(false);
+                    setSocket(null);
+                };
+
+                ws.onerror = error => {
+                    console.error(`Controller ${controllerCustomId} WebSocket Error:`, error);
+                    setAppStatusMessage('Network error! Is server running?');
+                    setIsConnected(false);
+                    setSocket(null);
+                };
+
+                // Cleanup on unmount
+                return () => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.close();
+                    }
+                };
+            }, []); // Empty dependency array means this runs once on mount
+
+            // Function to send commands to the server (to be forwarded to TV)
+            const sendCommand = useCallback((type, value = null) => {
+                if (socket && socket.readyState === WebSocket.OPEN && isConnected) {
+                    socket.send(JSON.stringify({ type: 'command', command: { type, value } }));
+                    setAppStatusMessage(`Command '${type}' sent.`);
+                } else {
+                    setAppStatusMessage("Not connected to TV or server.");
+                }
+            }, [socket, isConnected]); 
+
+            // Function to send interval setting to the server (to be forwarded to TV)
+            const sendIntervalSetting = useCallback((newInterval) => {
+                if (socket && socket.readyState === WebSocket.OPEN && isConnected) {
+                    socket.send(JSON.stringify({ type: 'settingsUpdate', settings: { callIntervalSeconds: newInterval } }));
+                    setAppStatusMessage(`Call interval set to ${newInterval} seconds.`);
+                } else {
+                    setAppStatusMessage("Not connected to TV or server.");
+                }
+            }, [socket, isConnected]);
+
+            // Function to send queued numbers to server
+            const sendQueuedNumbers = useCallback((numbers) => {
+                if (socket && socket.readyState === WebSocket.OPEN && isConnected) {
+                    // Filter out invalid numbers (1-75)
+                    const validNumbers = numbers.filter(num => typeof num === 'number' && num >= 1 && num <= 75);
+                    if (validNumbers.length === 0) {
+                        setAppStatusMessage("No valid numbers to queue.");
+                        return;
+                    }
+                    socket.send(JSON.stringify({ type: 'queueNumbers', numbers: validNumbers }));
+                    setAppStatusMessage(`Queued ${validNumbers.length} numbers.`);
+                    setNumbersToQueueInput(''); // Clear input after queuing
+                } else {
+                    setAppStatusMessage("Not connected to TV or server.");
+                }
+            }, [socket, isConnected]);
+
+            // Handle input for numbers to queue
+            const handleQueueInputChange = (e) => {
+                setNumbersToQueueInput(e.target.value);
+            };
+
+            // Handle Queue Numbers button click
+            const handleQueueButtonClick = () => {
+                const rawNumbers = numbersToQueueInput.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+                sendQueuedNumbers(rawNumbers);
+            };
+
+            const handleConnectToTv = useCallback(() => { 
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    setAppStatusMessage(`Attempting to join session: ${enteredCode}...`);
+                    socket.send(JSON.stringify({ type: 'joinSession', code: enteredCode, controllerCustomId: controllerCustomId }));
+                } else {
+                    setAppStatusMessage("WebSocket not connected. Server might be down.");
+                }
+            }, [socket, enteredCode]);
+
+            const handleIntervalChange = useCallback((change) => {
+                setCallInterval(prev => {
+                    const newInterval = Math.max(1, Math.min(20, prev + change));
+                    return newInterval;
+                });
+            }, []); 
+
+            const handleSaveSettings = useCallback(() => {
+                sendIntervalSetting(callInterval);
+                setShowSettingsModal(false); // Close modal on save
+            }, [callInterval, sendIntervalSetting]);
+
+            const SettingsModal = ({ callInterval, onIntervalChange, onSaveSettings, onClose, isConnected }) => { 
+                return (
+                    React.createElement('div', { className: "fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4 modal-overlay" },
+                        React.createElement('div', { className: "bg-gray-800 text-white p-8 rounded-lg shadow-xl max-w-lg w-full text-center flex flex-col items-center gap-6 border-4 border-yellow-400 overflow-y-auto max-h-[90vh]" },
+                            React.createElement('h2', { className: "text-3xl font-bold text-yellow-300 mb-4" }, "Call Interval Settings"),
+
+                            // Call Interval Adjustment
+                            React.createElement('div', { className: "w-full bg-gray-700 p-4 rounded-lg shadow-inner flex flex-col items-center" },
+                                React.createElement('label', { className: "block text-xl font-semibold text-gray-300 mb-4" }, "Call Interval (seconds):"),
+                                React.createElement('div', { className: "flex items-center space-x-4" },
+                                    React.createElement('button', {
+                                        onClick: () => onIntervalChange(-1),
+                                        className: "px-4 py-2 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition-colors duration-300 transform hover:scale-110 font-bold text-3xl disabled:opacity-50",
+                                        disabled: callInterval <= 1
+                                    }, "-"),
+                                    React.createElement('span', { className: "text-5xl font-extrabold text-blue-300" }, callInterval),
+                                    React.createElement('button', {
+                                        onClick: () => onIntervalChange(1),
+                                        className: "px-4 py-2 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition-colors duration-300 transform hover:scale-110 font-bold text-3xl disabled:opacity-50",
+                                        disabled: callInterval >= 20
+                                    }, "+")
+                                )
+                            ),
+
+                            React.createElement('button', {
+                                onClick: onSaveSettings,
+                                disabled: !isConnected, // Disabled if not connected
+                                className: "px-8 py-3 bg-lime-600 text-white rounded-lg shadow-md hover:bg-lime-700 transition-colors duration-300 transform hover:scale-105 font-semibold text-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                            }, "Apply Settings to TV"),
+                            React.createElement('button', {
+                                onClick: onClose,
+                                className: "px-8 py-3 bg-red-600 text-white rounded-lg shadow-md hover:bg-red-700 transition-colors duration-300 transform hover:scale-105 font-semibold text-lg"
+                            }, "Close")
+                        )
+                    )
+                );
+            };
+
+
+            return (
+                React.createElement('div', { className: "min-h-screen-mobile bg-gradient-to-br from-blue-700 to-green-800 text-white font-inter flex flex-col p-4 items-center" },
+                    React.createElement('div', { className: "w-full max-w-md mx-auto bg-gray-900 bg-opacity-70 rounded-xl shadow-2xl p-6 flex flex-col items-center gap-4" },
+
+                        React.createElement('h1', { className: "text-3xl font-extrabold text-lime-300 drop-shadow-lg text-center" },
+                            "Bingo Game Controller"
+                        ),
+
+                        // Connection Status
+                        React.createElement('div', { className: "w-full bg-gray-800 p-3 rounded-lg text-center text-sm font-semibold" },
+                            React.createElement('p', null, appStatusMessage)
+                        ),
+
+                        // 6-digit code input and connect button
+                        React.createElement('div', { className: "w-full flex flex-col gap-2 mb-4" },
+                            React.createElement('label', { htmlFor: "enteredCode", className: "text-lg font-semibold text-gray-300" }, "Enter Code:"),
+                            React.createElement('div', { className: "flex gap-2" },
+                                React.createElement('input', {
+                                    id: "enteredCode",
+                                    type: "text",
+                                    value: enteredCode,
+                                    onChange: (e) => setEnteredCode(e.target.value.replace(/\D/g, '').substring(0, 6)), // Only allow 6 digits
+                                    placeholder: "6-digit code",
+                                    className: "flex-grow p-3 rounded-lg bg-gray-600 text-white border border-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 text-center text-xl",
+                                    maxLength: 6
+                                }),
+                                React.createElement('button', {
+                                    onClick: handleConnectToTv,
+                                    disabled: !socket || socket.readyState !== WebSocket.OPEN || enteredCode.length !== 6 || isConnected, // Disable if socket not open or already connected
+                                    className: "px-6 py-3 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition-colors duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                }, isConnected ? 'Connected!' : 'Connect')
+                            )
+                        ),
+
+                        // Current TV State Display
+                        React.createElement('div', { className: "w-full bg-gray-800 p-4 rounded-xl shadow-inner border-2 border-yellow-500 text-center" },
+                            React.createElement('p', { className: "text-lg font-bold text-gray-300 mb-2" }, "TV Status:"),
+                            React.createElement('div', { className: "flex items-center justify-center gap-4" },
+                                React.createElement('div', { className: "rounded-full bg-yellow-500 text-gray-900 w-20 h-20 flex items-center justify-center text-center font-extrabold text-3xl shadow-lg" },
+                                    currentTvState.currentBall !== null ? currentTvState.currentBall : '-'
+                                ),
+                                React.createElement('div', { className: "flex flex-col items-start" },
+                                    React.createElement('p', { className: "text-md text-gray-300" }, `Remaining: ${currentTvState.availableBallsCount}`),
+                                    React.createElement('p', { className: "text-md text-blue-300" }, `Next in: ${currentTvState.countdown}s`),
+                                    React.createElement('p', { className: `text-md font-semibold ${currentTvState.isPlaying ? 'text-green-400' : 'text-red-400'}` },
+                                        `Status: ${currentTvState.isPlaying ? 'Playing' : 'Paused'}`
+                                    ),
+                                    currentTvState.message && React.createElement('p', { className: "text-sm text-red-300 mt-1" }, currentTvState.message)
+                                )
+                            )
+                        ),
+
+                        // Action Buttons
+                        React.createElement('div', { className: "grid grid-cols-2 gap-4 w-full mt-4" },
+                            React.createElement('button', { onClick: () => sendCommand('startGame'), className: "game-control-btn start", disabled: !isConnected }, "Start Game"),
+                            React.createElement('button', { onClick: () => sendCommand('stopGame'), className: "game-control-btn stop", disabled: !isConnected }, "Stop Game"),
+                            React.createElement('button', { onClick: () => sendCommand('nextBall'), className: "game-control-btn next", disabled: !isConnected }, "Call Next Ball"),
+                            React.createElement('button', { onClick: () => sendCommand('resetGame', currentTvState) /* Pass current TV state for reset */, className: "game-control-btn reset", disabled: !isConnected }, "Reset Game")
+                        ),
+
+                        // Settings Button for Call Interval (always enabled if authenticated, but saves only if connected)
+                        React.createElement('button', {
+                            onClick: () => setShowSettingsModal(true),
+                            disabled: !socket || socket.readyState !== WebSocket.OPEN || isConnected === false, // Disable if not connected to server or session
+                            className: "w-full px-6 py-3 bg-indigo-600 text-white rounded-lg shadow-md hover:bg-indigo-700 transition-colors duration-300 transform hover:scale-105 font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed mt-4"
+                        }, "Call Interval Settings"),
+
+                        // Queue Numbers Section
+                        React.createElement('div', { className: "w-full bg-gray-700 p-4 rounded-2xl shadow-lg border-2 border-purple-400 flex flex-col gap-4 mt-4" },
+                            React.createElement('h2', { className: "text-2xl font-bold mb-2 text-center text-purple-300" }, "Queue Next Numbers"),
+                            React.createElement('textarea', {
+                                className: "w-full p-3 rounded-lg bg-gray-600 text-white border border-gray-500 focus:outline-none focus:ring-2 focus:ring-lime-500",
+                                rows: "3",
+                                placeholder: "Enter numbers to call, separated by commas (e.g., 1, 23, 45, 60)",
+                                value: numbersToQueueInput,
+                                onChange: handleQueueInputChange,
+                                disabled: !isConnected
+                            }),
+                            React.createElement('button', {
+                                onClick: handleQueueButtonClick,
+                                disabled: numbersToQueueInput.trim() === '' || !isConnected,
+                                className: "w-full px-6 py-3 bg-lime-600 text-white rounded-lg shadow-md hover:bg-lime-700 transition-colors duration-300 transform hover:scale-105 font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                            }, "Queue Numbers"),
+                            React.createElement('p', { className: "text-xs text-gray-400 text-center" },
+                                "Only valid, uncalled numbers will be queued."
+                            )
+                        )
+                    ),
+                    // Render Settings Modal if showSettingsModal is true
+                    showSettingsModal && React.createElement(SettingsModal, {
+                        callInterval: callInterval,
+                        onIntervalChange: handleIntervalChange,
+                        onSaveSettings: handleSaveSettings,
+                        onClose: () => setShowSettingsModal(false),
+                        isConnected: isConnected // Pass isConnected state to disable apply button in modal
+                    })
+                )
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(React.createElement(App));
+    </script>
+</body>
+</html>

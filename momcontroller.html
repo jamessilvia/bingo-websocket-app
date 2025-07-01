@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bingo Mom's Controller</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a202c; /* Dark background */
+            color: #e2e8f0; /* Light text */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        /* Enhanced button styles */
+        .game-control-btn {
+            @apply py-4 px-6 rounded-xl font-extrabold text-xl shadow-lg transition-all duration-300 transform hover:scale-105 hover:shadow-xl;
+        }
+        /* All game control buttons are now solid green */
+        .game-control-btn.start,
+        .game-control-btn.stop,
+        .game-control-btn.next,
+        .game-control-btn.reset {
+            @apply bg-green-600 text-white border-2 border-green-700 hover:bg-green-700; /* Solid green background */
+        }
+
+        .input-field {
+            @apply w-full p-3 rounded-lg bg-gray-700 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-gray-200;
+        }
+        .modal-overlay {
+            background-color: rgba(0, 0, 0, 0.7);
+        }
+        .min-h-screen-mobile {
+            min-height: 100vh;
+            min-height: -webkit-fill-available;
+        }
+        .grid-cell {
+            width: 40px; /* Fixed size for grid cells */
+            height: 40px;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+
+    <script type="module">
+        // NO FIREBASE IMPORTS NEEDED FOR THIS APPROACH!
+        const App = () => {
+            const { useState, useEffect, useCallback } = React;
+
+            const [enteredCode, setEnteredCode] = useState(''); 
+            const [appStatusMessage, setAppStatusMessage] = useState('Enter 6-digit code to connect.');
+            const [isConnected, setIsConnected] = useState(false); // Manually triggered connect
+            const [socket, setSocket] = useState(null); // WebSocket connection
+            const [showSettingsModal, setShowSettingsModal] = useState(false);
+            
+            const [currentTvState, setCurrentTvState] = useState({ // State to keep track of TV status
+                currentBall: null,
+                calledBalls: [],
+                availableBallsCount: 75,
+                isPlaying: false,
+                message: '',
+                countdown: 0,
+            });
+
+            // Settings specific to Mom's Controller
+            const [selectedVoiceURI, setSelectedVoiceURI] = useState('');
+            const [availableVoices, setAvailableVoices] = useState([]);
+            const [customGamePatternIndices, setCustomGamePatternIndices] = useState([]); // Array of 0-24 indices for 5x5 grid
+
+            // Unique ID for this controller instance (for server to identify)
+            const controllerCustomId = 'mom_controller_' + Math.random().toString(36).substring(2, 9);
+
+            // WebSocket Connection and Message Handling
+            useEffect(() => {
+                const ws = new WebSocket('ws://localhost:8081'); // Connect to your Node.js WebSocket server
+
+                ws.onopen = () => {
+                    console.log(`Controller ${controllerCustomId} connected to WebSocket server.`);
+                    setSocket(ws); // Store socket in state
+                    setAppStatusMessage('Connected to server. Enter TV code.');
+                };
+
+                ws.onmessage = event => {
+                    const data = JSON.parse(event.data);
+                    console.log(`Controller ${controllerCustomId} Received:`, data);
+
+                    if (data.type === 'joined') {
+                        setIsConnected(true);
+                        setAppStatusMessage(`Successfully joined session ${data.code}.`);
+                    } else if (data.type === 'tvStatus') {
+                        // Update local UI with TV's status
+                        setCurrentTvState(data.status);
+                    } else if (data.type === 'initialSettings') {
+                        // Sync initial settings from TV
+                        if (data.settings.selectedVoiceURI !== undefined) setSelectedVoiceURI(data.settings.selectedVoiceURI);
+                        if (data.settings.customGamePatternIndices !== undefined) setCustomGamePatternIndices(data.settings.customGamePatternIndices);
+                    } else if (data.type === 'error') {
+                        setAppStatusMessage(`Error: ${data.message}`);
+                        setIsConnected(false);
+                        setSocket(null); // Clear socket on error
+                    } else if (data.type === 'sessionEnded') {
+                        setAppStatusMessage(`Session ended: ${data.message}`);
+                        setIsConnected(false);
+                        setSocket(null); // Clear socket
+                    }
+                };
+
+                ws.onclose = () => {
+                    console.log(`Controller ${controllerCustomId} Disconnected from WebSocket server.`);
+                    setAppStatusMessage('Disconnected. Server might be down or TV closed session.');
+                    setIsConnected(false);
+                    setSocket(null);
+                };
+
+                ws.onerror = error => {
+                    console.error(`Controller ${controllerCustomId} WebSocket Error:`, error);
+                    setAppStatusMessage('Network error! Is server running?');
+                    setIsConnected(false);
+                    setSocket(null);
+                };
+
+                // Cleanup on unmount
+                return () => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.close();
+                    }
+                };
+            }, []); // Empty dependency array means this runs once on mount
+
+
+            // Function to send commands to the server (to be forwarded to TV)
+            const sendCommand = useCallback((type, value = null) => {
+                if (socket && socket.readyState === WebSocket.OPEN && isConnected) {
+                    socket.send(JSON.stringify({ type: 'command', command: { type, value } }));
+                    setAppStatusMessage(`Command '${type}' sent.`);
+                } else {
+                    setAppStatusMessage("Not connected to TV or server.");
+                }
+            }, [socket, isConnected]); 
+
+            // Function to send all settings to the server (to be forwarded to TV)
+            const sendSettings = useCallback(() => {
+                if (socket && socket.readyState === WebSocket.OPEN && isConnected) {
+                    socket.send(JSON.stringify({ type: 'settingsUpdate', settings: { 
+                        selectedVoiceURI: selectedVoiceURI,
+                        customGamePatternIndices: customGamePatternIndices,
+                        // speechEnabled is managed by Mom's controller, but the TV display has its own internal state for it.
+                        // For simplicity, we assume TV's speech is enabled if voice is selected.
+                        speechEnabled: selectedVoiceURI !== '' // Example: assume speech is enabled if a voice is selected
+                    }}));
+                    setAppStatusMessage("Settings applied successfully!");
+                    setShowSettingsModal(false); 
+                } else {
+                    setAppStatusMessage("Not connected to TV or server.");
+                }
+            }, [socket, isConnected, selectedVoiceURI, customGamePatternIndices]);
+
+
+            const handleConnectToTv = useCallback(() => { 
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    setAppStatusMessage(`Attempting to join session: ${enteredCode}...`);
+                    socket.send(JSON.stringify({ type: 'joinSession', code: enteredCode, controllerCustomId: controllerCustomId }));
+                } else {
+                    setAppStatusMessage("WebSocket not connected. Server might be down.");
+                }
+            }, [socket, enteredCode]);
+
+            const togglePatternCell = useCallback((index) => {
+                setCustomGamePatternIndices(prev => {
+                    if (prev.includes(index)) {
+                        return prev.filter(i => i !== index).sort((a,b) => a-b);
+                    } else {
+                        return [...prev, index].sort((a,b) => a-b);
+                    }
+                });
+            }, []);
+
+            // Effect to populate voice options dynamically (from browser)
+            useEffect(() => {
+                if ('speechSynthesis' in window) {
+                    const populateVoices = () => {
+                        const voices = window.speechSynthesis.getVoices();
+                        setAvailableVoices(voices);
+                        if (!selectedVoiceURI && voices.length > 0) {
+                            const defaultVoice = voices.find(v => v.lang === 'en-US' || v.name.includes('Google US English')) || voices[0];
+                            setSelectedVoiceURI(defaultVoice ? defaultVoice.voiceURI : '');
+                        }
+                    };
+                    populateVoices();
+                    if (window.speechSynthesis.onvoiceschanged !== undefined) {
+                        window.speechSynthesis.onvoiceschanged = populateVoices;
+                    }
+                }
+            }, [selectedVoiceURI]);
+
+
+            const SettingsModal = ({
+                selectedVoiceURI, availableVoices, customGamePatternIndices,
+                onVoiceChange, onPatternToggle, onSaveSettings, onClose, isConnected
+            }) => { 
+                return (
+                    React.createElement('div', { className: "fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4 modal-overlay" },
+                        React.createElement('div', { className: "bg-gray-800 text-white p-8 rounded-lg shadow-xl max-w-lg w-full text-center flex flex-col items-center gap-6 border-4 border-yellow-400 overflow-y-auto max-h-[90vh]" },
+                            React.createElement('h2', { className: "text-3xl font-bold text-yellow-300 mb-4" }, "Game Settings"),
+
+                            // Voice Selection
+                            React.createElement('div', { className: "w-full bg-gray-700 p-4 rounded-lg shadow-inner text-left" },
+                                React.createElement('label', { htmlFor: "voiceSelect", className: "block text-md font-semibold text-gray-300 mb-2" }, "Caller Voice:"),
+                                React.createElement('select', {
+                                    id: "voiceSelect", className: "input-field",
+                                    value: selectedVoiceURI,
+                                    onChange: (e) => onVoiceChange(e.target.value)
+                                },
+                                    availableVoices.map(voice => (
+                                        React.createElement('option', { key: voice.voiceURI, value: voice.voiceURI }, `${voice.name} (${voice.lang})`)
+                                    ))
+                                )
+                            ),
+
+                            // 5x5 Game Pattern Grid
+                            React.createElement('div', { className: "w-full bg-gray-700 p-4 rounded-lg shadow-inner text-left" },
+                                React.createElement('h3', { className: "text-xl font-bold text-blue-300 mb-3 text-center" }, "Custom Game Pattern (5x5)"),
+                                React.createElement('div', { className: "grid grid-cols-5 gap-1 mx-auto", style: { maxWidth: '220px' } }, // Limit grid width
+                                    Array.from({ length: 25 }, (_, i) => i).map((index) => {
+                                        const isSelected = customGamePatternIndices.includes(index);
+                                        return (
+                                            React.createElement('div', {
+                                                key: index,
+                                                className: `grid-cell flex items-center justify-center border border-gray-600 rounded-sm cursor-pointer transition-colors duration-200
+                                                                ${isSelected ? 'bg-blue-600' : 'bg-gray-800'}`,
+                                                onClick: () => onPatternToggle(index)
+                                            })
+                                        );
+                                    })
+                                ),
+                                React.createElement('p', { className: "text-sm text-gray-400 mt-3 text-center" }, "Click cells to define your Bingo pattern.")
+                            ),
+
+                            React.createElement('button', {
+                                onClick: onSaveSettings,
+                                disabled: !isConnected, // Disabled if not connected
+                                className: "px-8 py-3 bg-lime-600 text-white rounded-lg shadow-md hover:bg-lime-700 transition-colors duration-300 transform hover:scale-105 font-semibold text-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                            }, "Apply Settings to TV"),
+                            React.createElement('button', {
+                                onClick: onClose,
+                                className: "px-8 py-3 bg-red-600 text-white rounded-lg shadow-md hover:bg-red-700 transition-colors duration-300 transform hover:scale-105 font-semibold text-lg"
+                            }, "Close")
+                        )
+                    )
+                );
+            };
+
+
+            return (
+                React.createElement('div', { className: "min-h-screen-mobile bg-gradient-to-br from-blue-700 to-green-800 text-white font-inter flex flex-col p-4 items-center" },
+                    React.createElement('div', { className: "w-full max-w-md mx-auto bg-gray-900 bg-opacity-70 rounded-xl shadow-2xl p-6 flex flex-col items-center gap-4" },
+
+                        React.createElement('h1', { className: "text-3xl font-extrabold text-lime-300 drop-shadow-lg text-center" },
+                            "Bingo Pattern Controller"
+                        ),
+
+                        // Connection Status
+                        React.createElement('div', { className: "w-full bg-gray-800 p-3 rounded-lg text-center text-sm font-semibold" },
+                            React.createElement('p', null, appStatusMessage)
+                        ),
+
+                        // 6-digit code input and connect button
+                        React.createElement('div', { className: "w-full flex flex-col gap-2 mb-4" },
+                            React.createElement('label', { htmlFor: "enteredCode", className: "text-lg font-semibold text-gray-300" }, "Enter Code:"),
+                            React.createElement('div', { className: "flex gap-2" },
+                                React.createElement('input', {
+                                    id: "enteredCode",
+                                    type: "text",
+                                    value: enteredCode,
+                                    onChange: (e) => setEnteredCode(e.target.value.replace(/\D/g, '').substring(0, 6)), // Only allow 6 digits
+                                    placeholder: "6-digit code",
+                                    className: "flex-grow p-3 rounded-lg bg-gray-600 text-white border border-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 text-center text-xl",
+                                    maxLength: 6
+                                }),
+                                React.createElement('button', {
+                                    onClick: handleConnectToTv,
+                                    disabled: !socket || socket.readyState !== WebSocket.OPEN || enteredCode.length !== 6 || isConnected, // Disable if socket not open or already connected
+                                    className: "px-6 py-3 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition-colors duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                }, isConnected ? 'Connected!' : 'Connect')
+                            )
+                        ),
+                        
+                        // All Game Control Buttons
+                        React.createElement('div', { className: "grid grid-cols-2 gap-4 w-full mt-4" },
+                            React.createElement('button', { onClick: () => sendCommand('startGame'), className: "game-control-btn start", disabled: !isConnected }, "Start Game"),
+                            React.createElement('button', { onClick: () => sendCommand('stopGame'), className: "game-control-btn stop", disabled: !isConnected }, "Stop Game"),
+                            React.createElement('button', { onClick: () => sendCommand('nextBall'), className: "game-control-btn next", disabled: !isConnected }, "Call Next Ball"),
+                            React.createElement('button', { onClick: () => sendCommand('resetGame', currentTvState) /* Pass current TV state for reset */, className: "game-control-btn reset", disabled: !isConnected }, "Reset Game")
+                        ),
+
+                        // Settings Button (always enabled if authenticated, but saves only if connected)
+                        React.createElement('button', {
+                            onClick: () => setShowSettingsModal(true),
+                            disabled: !socket || socket.readyState !== WebSocket.OPEN || isConnected === false, // Disable if not connected to server or session
+                            className: "w-full px-6 py-3 bg-purple-600 text-white rounded-lg shadow-md hover:bg-purple-700 transition-colors duration-300 transform hover:scale-105 font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                        }, "Game Pattern & Voice Settings"),
+
+                        // Render Settings Modal if showSettingsModal is true
+                        showSettingsModal && React.createElement(SettingsModal, {
+                            selectedVoiceURI: selectedVoiceURI,
+                            availableVoices: availableVoices,
+                            customGamePatternIndices: customGamePatternIndices,
+                            onVoiceChange: setSelectedVoiceURI,
+                            onPatternToggle: togglePatternCell,
+                            onSaveSettings: sendSettings,
+                            onClose: () => setShowSettingsModal(false),
+                            isConnected: isConnected // Pass isConnected state to disable apply button in modal
+                        })
+                    )
+                )
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(React.createElement(App));
+    </script>
+</body>
+</html>
